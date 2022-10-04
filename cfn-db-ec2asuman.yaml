@@ -1,0 +1,266 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: |
+  CloudFormation Template for Phonebook Application.
+  
+Parameters:
+  VPC:
+    Description: VPC Id of your existing account
+    Type: AWS::EC2::VPC::Id
+
+  KeyPair:
+    Description: Please enter your valid Key pair
+    Type: AWS::EC2::KeyPair::KeyName
+
+  Subnets:
+    Description: choose your subnets
+    Type: List<AWS::EC2::Subnet::Id>
+
+  InstenceType:
+    Description: Select instance type
+    Type: String
+    Default: t2.micro
+    AllowedValues: 
+    - t2.micro
+    - t3.micro
+    - t2.nano
+    - t3.nano
+
+Mappings:
+  RegionImageMap:
+    us-east-1:
+      AMI: ami-05fa00d4c63e32376
+    us-east-2:
+      AMI: ami-0233c2d874b811deb
+    us-west-1:
+      AMI: ami-0ed05376b59b90e46
+    us-west-2:
+      AMI: ami-0dc8f589abe99f538
+    eu-west-1:
+      AMI: ami-058b1b7fe545997ae
+
+  
+
+Resources:
+  CFNInstance:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !FindInMap
+          - RegionImageMap
+          - !Ref AWS::Region
+          - AMI
+        InstanceType: !Ref InstenceType
+        KeyName: !Ref KeyPair # Please use your key pair name without pem.
+        SecurityGroupIds:
+          - !GetAtt CFNSecGroup.GroupId
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub Database of ${AWS::StackName} Stack
+        UserData: 
+          Fn::Base64: !Sub    #or !Base64
+          - |
+            #!/bin/bash
+            yum update -y
+            pip3 install flask
+            pip3 install flask-mysql
+            yum install git -y   
+            echo "${MyDBURI}" > /home/ec2-user/dbserver.endpoint
+            cd /home/ec2-user
+            git clone https://github.com/usuladams/myphonebookproject.git
+            cd
+            cd /home/ec2-user/myphonebookproject/
+            python3 phonebook-app1.py
+          - MyDBURI: !GetAtt MyDatabaseServer.Endpoint.Address
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      IpAddressType: ipv4
+      Scheme: internet-facing
+      SecurityGroups:
+        - !GetAtt CFNSecGroup.GroupId
+      Subnets: !Ref Subnets
+      Type: application
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      # AlpnPolicy:
+      #   AlpnPolicy
+      DefaultActions: # Required
+        - Type: forward
+          # TargetGroups:
+          TargetGroupArn: !Ref ServerTargetGroup
+      LoadBalancerArn: !Ref  ApplicationLoadBalancer # Required
+      Port: 80
+      Protocol: HTTP
+  
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AvailabilityZones: !GetAZs
+      DesiredCapacity: "2"
+      HealthCheckGracePeriod: 90
+      HealthCheckType: ELB
+      LaunchTemplate:
+        LaunchTemplateId: !Ref CFNInstance
+        Version: "1"
+        # Version: !GetAtt CFNInstance.LatestVersionNumber
+      MaxSize: "3" # Required
+      MinSize: "1" # Required
+      TargetGroupARNs:
+        - !Ref ServerTargetGroup
+
+
+  CFNSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enables SSH for CFN Instance # Required
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          # SourceSecurityGroupId: !GetAtt ALBSecurityGroup.GroupId
+
+
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: 0.0.0.0/0
+      VpcId: !Ref VPC
+
+
+  # ALBSecurityGroup:
+  #   Type: AWS::EC2::SecurityGroup
+  #   Properties:
+  #     GroupDescription: Enable HTTP for Application Load Balancer
+  #     SecurityGroupIngress:
+  #       - IpProtocol: tcp
+  #         FromPort: 80
+  #         ToPort: 80
+  #         CidrIp: 0.0.0.0/0
+  #     VpcId: !Ref VPC  
+
+  ServerTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 5
+      Port: 80
+      Protocol: HTTP
+      TargetType: instance
+      UnhealthyThresholdCount: 3
+      VpcId: !Ref VPC
+
+
+  # MyDBSecurityGroup:
+  #   Type: AWS::RDS::DBSecurityGroup
+  #   Properties:
+  #     DBSecurityGroupIngress: # Required
+  #       - CIDRIP: 0.0.0.0/0
+  #       - EC2SecurityGroupId: !GetAtt CFNSecGroup.GroupId
+  #     GroupDescription: Back-end access to RDS # Required
+
+
+  MyDatabaseServer:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      AllocatedStorage: 20
+      AllowMajorVersionUpgrade: false
+      AutoMinorVersionUpgrade: false
+      BackupRetentionPeriod: 0     
+      DBInstanceClass: db.t2.micro
+      DBInstanceIdentifier: phonebook-app-db
+      DBName: phonebook
+      Engine: MySQL
+      EngineVersion: 8.0.28
+      MasterUserPassword: 1234567890
+      MasterUsername: admin
+      Port: 3306
+      PubliclyAccessible: true
+      VPCSecurityGroups:
+        - !GetAtt CFNSecGroup.GroupId
+        #- sg-080957794233c29d6
+      # DBSecurityGroups: 
+      #   - !Ref MyDBSecurityGroup
+
+ 
+  WebServerScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref AutoScalingGroup # Required
+      Cooldown: 60
+      ScalingAdjustment: 1
+
+  WebServerScaleDownPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref AutoScalingGroup # Required
+      Cooldown: 60
+      ScalingAdjustment: -1
+
+
+  # CPUPolicy:
+  #   Type: AWS::AutoScaling::ScalingPolicy
+  #   Properties:
+  #     AutoScalingGroupName: !Ref AutoScalingGroup # Required
+  #     PolicyType: TargetTrackingScaling
+  #     TargetTrackingConfiguration:
+  #       PredefinedMetricSpecification: 
+  #         PredefinedMetricType: ASGAverageCPUUtilization
+  #       TargetValue: 80.0   #bunu düşürebiliriz
+      
+  
+  CPUAlarmHigh:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - !Ref WebServerScaleUpPolicy
+      AlarmDescription: Scale-up if CPU > 90% for 10 minutes
+      ComparisonOperator: GreaterThanThreshold # Required
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref WebServerScaleUpPolicy
+      EvaluationPeriods: 2 # Required
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Period: 300  #süreyi buradan azaltabiliriz.
+      Statistic: Average
+      Threshold: 90 #ortalama aldığı için düşürebiliriz opsiyonel
+
+  CPUAlarmLow:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - !Ref WebServerScaleUpPolicy
+      AlarmDescription: Scale-down if CPU < 70% for 10 minutes
+      ComparisonOperator: LessThanThreshold # Required
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref WebServerScaleDownPolicy
+      EvaluationPeriods: 2 # Required
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Period: 300
+      Statistic: Average
+      Threshold: 70
+      
+
+Outputs:
+  WebsiteURL:
+    Value: !Sub
+      - http://${PublicAddress}
+      - PublicAddress: !GetAtt ApplicationLoadBalancer.DNSName
+    Description: Phonebook Application URL
