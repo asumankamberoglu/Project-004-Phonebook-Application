@@ -68,9 +68,9 @@ Resources:
             yum install git -y   
             echo "${MyDBURI}" > /home/ec2-user/dbserver.endpoint
             cd /home/ec2-user
-            git clone https://github.com/usuladams/myphonebookproject.git
+            git clone https://github.com/asumankamberoglu/Project-004-Phonebook-Application.git
             cd
-            cd /home/ec2-user/myphonebookproject/
+            cd /home/ec2-user/Project-004-Phonebook-Application.git/
             python3 phonebook-app1.py
           - MyDBURI: !GetAtt MyDatabaseServer.Endpoint.Address
 
